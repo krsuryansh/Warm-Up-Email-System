@@ -1,0 +1,179 @@
+//old without Env
+
+
+
+import express from 'express';
+import mongoose from 'mongoose';
+import cron from 'node-cron';
+import nodemailer from 'nodemailer';
+import cors from 'cors';
+
+// Initialize Express app
+const app = express();
+app.use(express.json());
+
+// Middleware
+app.use(cors());
+app.options('*', cors()); // Handle preflight requests
+
+// MongoDB connection
+mongoose.connect('mongodb+srv://krsuryansh:Suryansh123@cluster0.o54u7.mongodb.net/email-warmup', { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log("Connected To DB"))
+  .catch(err => console.error("Error in connecting to DB", err));
+
+// Mongoose schema for email configuration
+const EmailConfigSchema = new mongoose.Schema({
+  email: { type: String, required: true },
+  appPassword: { type: String, required: true },
+  numberOfEmailsPerDay: { type: Number, required: true },
+  intervalInMinutes: { type: Number, required: true },
+  increaseFrequencyOverTime: { type: Boolean, default: false },
+  receiversEmail: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+});
+
+// Updated EmailStatus schema with expectedReplyTime
+const EmailStatusSchema = new mongoose.Schema({
+  email: { type: String, required: true },
+  status: { type: String, enum: ['scheduled', 'sent', 'failed', 'replied'], default: 'pending' },
+  timestamp: { type: Date, default: Date.now },
+  expectedReplyTime: { type: Date }, // New field for expected reply time
+});
+
+const EmailConfig = mongoose.model('EmailConfig', EmailConfigSchema);
+const EmailStatus = mongoose.model('EmailStatus', EmailStatusSchema);
+
+// Route to store email configuration
+app.post('/api/configure', async (req, res) => {
+  try {
+    const { userEmail, appPassword, numberOfEmails, timeInterval, receiver } = req.body;
+
+    const config = new EmailConfig({
+      email: userEmail,
+      appPassword: appPassword,
+      numberOfEmailsPerDay: parseInt(numberOfEmails, 10),
+      intervalInMinutes: parseFloat(timeInterval, 10),
+      receiversEmail: receiver,
+    });
+
+    await config.save();
+    scheduleEmails(config);
+    res.status(201).send({ message: 'Configuration saved successfully.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: 'Failed to save configuration.' });
+  }
+});
+
+// Schedule emails
+const scheduleEmails = (config) => {
+  const interval = config.intervalInMinutes * 60 * 1000;
+  for (let i = 0; i < config.numberOfEmailsPerDay; i++) {
+    setTimeout(() => {
+      sendEmail(config);
+    }, i * interval);
+  }
+};
+
+// Function to send email
+const sendEmail = async (config) => {
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    auth: {
+      user: config.email,
+      pass: config.appPassword,
+    },
+  });
+
+  const mailOptions = {
+    from: config.email,
+    to: 'kumarsuryansh08@gmail.com', // Preconfigured default email
+    subject: 'Warmup Email 01',
+    html: `<p>This is a warmup email.${Date.now()}</p>`,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    const status = new EmailStatus({ email: config.email, status: 'sent' });
+    await status.save();
+    console.log(`Email sent from ${config.email}`);
+  } catch (error) {
+    const status = new EmailStatus({ email: config.email, status: 'failed' });
+    await status.save();
+    console.error(`Failed to send email from ${config.email}:`, error);
+  }
+};
+
+// Function to reply to an email and update the expected reply time
+const repliedEmail = async (email) => {
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    auth: {
+      user: 'kumarsuryansh08@gmail.com',
+      pass: 'ayjf bhsz twaf gchn',
+    },
+  });
+
+  const mailOptions = {
+    from: 'kumarsuryansh08@gmail.com',
+    to: email, // Preconfigured default email
+    subject: 'Warmup reply Email 01',
+    html: '<p>This is a warmup email.</p>',
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    const status = new EmailStatus({ email: email, status: 'replied' });
+    await status.save();
+    console.log(`Replied to email from ${email}`);
+  } catch (error) {
+    const status = new EmailStatus({ email: email, status: 'failed' });
+    await status.save();
+    console.error(`Failed to reply to email from ${email}:`, error);
+  }
+};
+
+// Function to schedule email replies within one hour from now
+const scheduleReply = () => {
+  cron.schedule('* * * * *', async () => {
+    const sentEmails = await EmailStatus.find({ status: 'sent' });
+    if (sentEmails.length > 0) {
+      sentEmails.forEach(async (email) => {
+        // Set random delay up to 1 hour (3600 seconds)
+        const randomDelay = Math.random() * 3600 * 1000 + 1000; // Random delay up to 1 hour
+        const expectedReplyTimeUTC = new Date(Date.now() + randomDelay);
+          email.expectedReplyTime = expectedReplyTimeUTC;
+          email.status = "scheduled"
+          await email.save();
+          console.log(`Replying to email sent from ${email.email} at ${expectedReplyTimeUTC} (IST)`);
+
+          setTimeout(async () => {
+            repliedEmail(email.email);
+          }, randomDelay);
+      });
+    }
+  });
+};
+
+
+// API Route to Fetch Data
+app.get('/api/dashboard', async (req, res) => {
+  try {
+    const emailConfigs = await EmailConfig.find();
+    const emailStatuses = await EmailStatus.find();
+    res.json({ emailConfigs, emailStatuses });
+  } catch (error) {
+    res.status(500).send({ error: 'Error fetching data' });
+  }
+});
+
+
+// Start server and initialize email scheduling
+app.listen(3000, () => {
+  console.log('Server running on http://localhost:3000');
+  scheduleReply();
+});
